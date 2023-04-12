@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -236,6 +235,36 @@ func createUnstructured(t *testing.T, config string) *unstructured.Unstructured 
 		Object: result,
 	}
 }
+
+type singleConditionMatcher struct {
+	conditionName  string
+	conditionValue string
+}
+
+func newSingleConditionMatcher(conditionName, conditionValue string) *singleConditionMatcher {
+	return &singleConditionMatcher{
+		conditionName:  conditionName,
+		conditionValue: conditionValue,
+	}
+}
+
+func (sccm *singleConditionMatcher) Requires(conditionName string) bool {
+	return sccm.conditionName == conditionName
+}
+
+func (sccm *singleConditionMatcher) Matches(conditions map[string]string) bool {
+	for conditionName, conditionStatus := range conditions {
+		if !strings.EqualFold(sccm.conditionName, conditionName) {
+			continue
+		}
+
+		return strings.EqualFold(sccm.conditionValue, conditionStatus)
+	}
+
+	return false
+}
+
+var _ ConditionMatcher = &singleConditionMatcher{}
 
 func TestWaitForDeletion(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -957,13 +986,14 @@ func TestWaitForCondition(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fakeClient := test.fakeClient()
+			conditionMatcher := newSingleConditionMatcher("the-condition", "status-value")
 			o := &WaitOptions{
 				ResourceFinder: genericclioptions.NewSimpleFakeResourceFinder(test.infos...),
 				DynamicClient:  fakeClient,
 				Timeout:        test.timeout,
 
 				Printer:     printers.NewDiscardingPrinter(),
-				ConditionFn: ConditionalWait{conditionName: "the-condition", conditionStatus: "status-value", errOut: io.Discard}.IsConditionMet,
+				ConditionFn: ConditionalWait{conditionMatcher: conditionMatcher, errOut: io.Discard}.IsConditionMet,
 				IOStreams:   genericclioptions.NewTestIOStreamsDiscard(),
 			}
 			err := o.RunWait()

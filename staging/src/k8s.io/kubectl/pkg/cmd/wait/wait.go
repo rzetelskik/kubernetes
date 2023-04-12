@@ -26,13 +26,14 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
@@ -191,17 +192,16 @@ func conditionFuncFor(condition string, errOut io.Writer) (ConditionFunc, error)
 		return IsDeleted, nil
 	}
 	if strings.HasPrefix(condition, "condition=") {
-		conditionName := condition[len("condition="):]
-		conditionValue := "true"
-		if equalsIndex := strings.Index(conditionName, "="); equalsIndex != -1 {
-			conditionValue = conditionName[equalsIndex+1:]
-			conditionName = conditionName[0:equalsIndex]
+		conditions := condition[len("condition="):]
+
+		conditionMatcher, err := newLabelSelectorConditionMatcher(conditions)
+		if err != nil {
+			return nil, err
 		}
 
 		return ConditionalWait{
-			conditionName:   conditionName,
-			conditionStatus: conditionValue,
-			errOut:          errOut,
+			conditionMatcher: conditionMatcher,
+			errOut:           errOut,
 		}.IsConditionMet, nil
 	}
 	if strings.HasPrefix(condition, "jsonpath=") {
@@ -238,6 +238,65 @@ func newJSONPathParser(jsonPathExpression string) (*jsonpath.JSONPath, error) {
 	}
 	return j, nil
 }
+
+type ConditionMatcher interface {
+	Requires(string) bool
+
+	Matches(map[string]string) bool
+}
+
+type labelSelectorConditionMatcher struct {
+	conditionSelector labels.Selector
+}
+
+func newLabelSelectorConditionMatcher(conditions string) (*labelSelectorConditionMatcher, error) {
+	requirements, err := labels.ParseToRequirements(conditions)
+	if err != nil {
+		return nil, err
+	}
+
+	modifiedRequirements := make(labels.Requirements, 0)
+	for _, r := range requirements {
+		key := r.Key()
+		operator := r.Operator()
+		values := r.Values()
+
+		switch operator {
+		case selection.Exists:
+			{
+				operator = selection.Equals
+				values.Insert(string(metav1.ConditionTrue))
+			}
+		case selection.DoesNotExist:
+			{
+				operator = selection.Equals
+				values.Insert(string(metav1.ConditionFalse))
+			}
+		}
+
+		newRequirement, err := labels.NewRequirement(key, operator, values.List())
+		if err != nil {
+			return nil, err
+		}
+		modifiedRequirements = append(modifiedRequirements, *newRequirement)
+	}
+
+	conditionSelector := labels.NewSelector().Add(modifiedRequirements...)
+	return &labelSelectorConditionMatcher{
+		conditionSelector: conditionSelector,
+	}, nil
+}
+
+func (lscm *labelSelectorConditionMatcher) Requires(name string) bool {
+	_, found := lscm.conditionSelector.RequiresExactMatch(name)
+	return found
+}
+
+func (lscm *labelSelectorConditionMatcher) Matches(conditions map[string]string) bool {
+	return lscm.conditionSelector.Matches(labels.Set(conditions))
+}
+
+var _ ConditionMatcher = &labelSelectorConditionMatcher{}
 
 // processJSONPathInput will parses the user's JSONPath input and process the string
 func processJSONPathInput(jsonPathExpression, jsonPathCond string) (string, string, error) {
@@ -515,8 +574,7 @@ func getObjAndCheckCondition(ctx context.Context, info *resource.Info, o *WaitOp
 
 // ConditionalWait hold information to check an API status condition
 type ConditionalWait struct {
-	conditionName   string
-	conditionStatus string
+	conditionMatcher ConditionMatcher
 	// errOut is written to if an error occurs
 	errOut io.Writer
 }
@@ -527,34 +585,45 @@ func (w ConditionalWait) IsConditionMet(ctx context.Context, info *resource.Info
 }
 
 func (w ConditionalWait) checkCondition(obj *unstructured.Unstructured) (bool, error) {
-	conditions, found, err := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	unstructuredConditions, found, err := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	if err != nil {
 		return false, err
 	}
 	if !found {
 		return false, nil
 	}
-	for _, conditionUncast := range conditions {
+
+	generation, generationFound, _ := unstructured.NestedInt64(obj.Object, "metadata", "generation")
+
+	conditions := make(labels.Set, 0)
+	for _, conditionUncast := range unstructuredConditions {
 		condition := conditionUncast.(map[string]interface{})
 		name, found, err := unstructured.NestedString(condition, "type")
-		if !found || err != nil || !strings.EqualFold(name, w.conditionName) {
+		if !found || err != nil {
 			continue
 		}
+
+		conditionRequired := w.conditionMatcher.Requires(name)
+		if !conditionRequired {
+			continue
+		}
+
 		status, found, err := unstructured.NestedString(condition, "status")
 		if !found || err != nil {
 			continue
 		}
-		generation, found, _ := unstructured.NestedInt64(obj.Object, "metadata", "generation")
-		if found {
+
+		if generationFound {
 			observedGeneration, found := getObservedGeneration(obj, condition)
 			if found && observedGeneration < generation {
 				return false, nil
 			}
 		}
-		return strings.EqualFold(status, w.conditionStatus), nil
+
+		conditions[name] = status
 	}
 
-	return false, nil
+	return w.conditionMatcher.Matches(conditions), nil
 }
 
 func (w ConditionalWait) isConditionMet(event watch.Event) (bool, error) {

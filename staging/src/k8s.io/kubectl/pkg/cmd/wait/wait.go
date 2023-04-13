@@ -246,6 +246,7 @@ type ConditionMatcher interface {
 }
 
 type labelSelectorConditionMatcher struct {
+	// TODO: use cases.Fold?
 	conditionSelector labels.Selector
 }
 
@@ -257,10 +258,8 @@ func newLabelSelectorConditionMatcher(conditions string) (*labelSelectorConditio
 
 	modifiedRequirements := make(labels.Requirements, 0)
 	for _, r := range requirements {
-		key := r.Key()
-		operator := r.Operator()
 		values := r.Values()
-
+		operator := r.Operator()
 		switch operator {
 		case selection.Exists:
 			{
@@ -274,7 +273,13 @@ func newLabelSelectorConditionMatcher(conditions string) (*labelSelectorConditio
 			}
 		}
 
-		newRequirement, err := labels.NewRequirement(key, operator, values.List())
+		key := strings.ToLower(r.Key())
+		valueList := make([]string, 0)
+		for _, v := range values.List() {
+			valueList = append(valueList, strings.ToLower(v))
+		}
+
+		newRequirement, err := labels.NewRequirement(key, operator, valueList)
 		if err != nil {
 			return nil, err
 		}
@@ -288,12 +293,17 @@ func newLabelSelectorConditionMatcher(conditions string) (*labelSelectorConditio
 }
 
 func (lscm *labelSelectorConditionMatcher) Requires(name string) bool {
-	_, found := lscm.conditionSelector.RequiresExactMatch(name)
+	_, found := lscm.conditionSelector.RequiresExactMatch(strings.ToLower(name))
 	return found
 }
 
 func (lscm *labelSelectorConditionMatcher) Matches(conditions map[string]string) bool {
-	return lscm.conditionSelector.Matches(labels.Set(conditions))
+	lowerConditions := map[string]string{}
+	for k, v := range conditions {
+		lowerConditions[strings.ToLower(k)] = strings.ToLower(v)
+	}
+
+	return lscm.conditionSelector.Matches(labels.Set(lowerConditions))
 }
 
 var _ ConditionMatcher = &labelSelectorConditionMatcher{}

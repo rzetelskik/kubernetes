@@ -1012,6 +1012,111 @@ func TestWaitForCondition(t *testing.T) {
 	}
 }
 
+func TestLabelSelectorConditionMatcherRequires(t *testing.T) {
+	tests := []struct {
+		name          string
+		conditions    string
+		conditionName string
+		expected      bool
+	}{
+		{
+			name:          "condition with default \"True\" value is required",
+			conditions:    "the-condition,some-other-condition=status-value",
+			conditionName: "the-condition",
+			expected:      true,
+		},
+		{
+			name:          "condition with default \"False\" value is required",
+			conditions:    "!the-condition,some-other-condition=status-value",
+			conditionName: "the-condition",
+			expected:      true,
+		},
+		{
+			name:          "condition with explicitly assigned value is required",
+			conditions:    "the-condition=status-value,some-other-condition=status-value",
+			conditionName: "the-condition",
+			expected:      true,
+		},
+		{
+			name:          "not specified condition is not required",
+			conditions:    "the-condition=status-value",
+			conditionName: "some-other-condition",
+			expected:      false,
+		},
+		{
+			name:          "condition is required case insensitively",
+			conditions:    "the-condition=status-value",
+			conditionName: "The-condition",
+			expected:      true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			conditionMatcher, err := newLabelSelectorConditionMatcher(test.conditions)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got := conditionMatcher.Requires(test.conditionName)
+			if test.expected != got {
+				t.Fatalf("expected %t, got %t", test.expected, got)
+			}
+		})
+	}
+}
+
+func TestLabelSelectorConditionMatcherMatches(t *testing.T) {
+	tests := []struct {
+		name             string
+		conditions       string
+		statusConditions map[string]string
+		expected         bool
+	}{
+		{
+			name:       "condition with default \"True\" value matches",
+			conditions: "the-condition",
+			statusConditions: map[string]string{
+				"the-condition":        "True",
+				"some-other-condition": "status-value",
+			},
+			expected: true,
+		},
+		{
+			name:       "condition with default \"False\" value matches",
+			conditions: "!the-condition",
+			statusConditions: map[string]string{
+				"the-condition":        "False",
+				"some-other-condition": "status-value",
+			},
+			expected: true,
+		},
+		{
+			name:       "multiple conditions match",
+			conditions: "the-condition=status-value,some-other-condition=some-other-status-value",
+			statusConditions: map[string]string{
+				"the-condition":        "status-value",
+				"some-other-condition": "some-other-status-value",
+			},
+			expected: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			conditionMatcher, err := newLabelSelectorConditionMatcher(test.conditions)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got := conditionMatcher.Matches(test.statusConditions)
+			if test.expected != got {
+				t.Fatalf("expected %t, got %t", test.expected, got)
+			}
+		})
+	}
+}
+
 func TestWaitForDeletionIgnoreNotFound(t *testing.T) {
 	scheme := runtime.NewScheme()
 	listMapping := map[schema.GroupVersionResource]string{
